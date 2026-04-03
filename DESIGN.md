@@ -129,7 +129,7 @@ The MVP exists to answer one question: **is the graph a better way to discover c
 | Backend hosting | AWS ECS Fargate | Managed containers, no server management, team has AWS experience |
 | Primary database | PostgreSQL (AWS RDS) | Relational, managed, battle-tested for social data |
 | Vector database | Pinecone | Already integrated, managed, serverless, strong ANN performance |
-| Embeddings | OpenAI text-embedding-3-small (1024d) | Already integrated, strong semantic quality |
+| Embeddings | OpenAI text-embedding-3-small (1536d) | Already integrated, strong semantic quality, full dimensions for maximum expressiveness on short text |
 | Authentication | AWS Cognito | AWS-native, integrates with existing infra, handles OAuth/email auth |
 | Container registry | AWS ECR | Native Fargate integration |
 | Load balancer | AWS ALB | Standard, integrates with ECS |
@@ -191,7 +191,7 @@ Pinecone stores:
 ```
 {
   id: "<tweet_id>",
-  values: [...1024 floats...],
+  values: [...1536 floats...],
   metadata: {
     text: "<title> <content>",
     user_id: "<user_id>",
