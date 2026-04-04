@@ -6,6 +6,7 @@ from django.db import transaction
 from .models import TweetNode, EmbeddingReference
 from .services.embedding import generate_embedding
 from .services.pinecone import upsert_vector
+from graphs.services.graph import build_profile_graph
 
 
 class TweetListCreateView(APIView):
@@ -45,6 +46,9 @@ class TweetListCreateView(APIView):
                 tweet=tweet,
                 pinecone_vector_id=str(tweet.id),
             )
+
+        # Rebuild the user's profile graph now that a new tweet exists
+        build_profile_graph(request.user)
 
         return Response(
             {
