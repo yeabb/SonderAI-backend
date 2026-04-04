@@ -1,3 +1,4 @@
+import threading
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -47,8 +48,10 @@ class TweetListCreateView(APIView):
                 pinecone_vector_id=str(tweet.id),
             )
 
-        # Rebuild the user's profile graph now that a new tweet exists
-        build_profile_graph(request.user)
+        # Rebuild the profile graph in the background — don't block the API response
+        user = request.user
+        thread = threading.Thread(target=build_profile_graph, args=(user,), daemon=True)
+        thread.start()
 
         return Response(
             {

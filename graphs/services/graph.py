@@ -204,20 +204,73 @@ def _serialize_graph(candidates: list[dict], edges: list[dict], tweet_map: dict)
     return {"nodes": nodes, "edges": edges}
 
 
+def _recency_boost(candidates: list[dict]) -> list[dict]:
+    """
+    Re-rank Pinecone candidates by combining semantic similarity score
+    with a recency decay factor based on the tweet's created_at metadata.
+
+    final_score = similarity_score * e^(-λ * days_since_created)
+
+    This ensures recent content gets a boost without completely burying
+    highly relevant older content. Returns top TOP_K candidates sorted
+    by final_score descending.
+    """
+    now = django_timezone.now()
+    scored = []
+    for c in candidates:
+        created_at_str = c["metadata"].get("created_at") if c.get("metadata") else None
+        if created_at_str:
+            try:
+                from datetime import datetime, timezone as dt_timezone
+                created_at = datetime.fromisoformat(created_at_str).replace(tzinfo=dt_timezone.utc)
+                days_ago = (now - created_at).total_seconds() / 86400
+                recency_factor = math.exp(-DECAY_LAMBDA * days_ago)
+            except Exception:
+                recency_factor = 1.0
+        else:
+            recency_factor = 1.0
+
+        final_score = c["score"] * recency_factor
+        scored.append({**c, "final_score": final_score})
+
+    scored.sort(key=lambda x: x["final_score"], reverse=True)
+    return scored[:TOP_K]
+
+
 def build_feed_graph(user) -> dict:
     """
     Build the user's personal feed graph.
-    Computes a recency-decayed anchor embedding, queries Pinecone for
-    top-K candidates, constructs edges via pairwise cosine similarity,
-    and returns graph JSON.
+
+    1. Compute recency-decayed anchor embedding from interaction history
+    2. Query Pinecone for top-100 candidates, excluding already-visited tweets
+       (exclusion happens inside the query — not post-filter — so the result
+       set is always full-sized regardless of how much the user has seen)
+    3. Re-rank by recency-boosted score, take top-50
+    4. Build edges via pairwise cosine similarity
+    5. Return graph JSON
 
     Called on session start — not on every page load.
     """
     anchor = _compute_anchor_embedding(user)
-    candidates = query_similar(anchor, top_k=TOP_K)
 
-    if not candidates:
+    # Collect visited tweet IDs to exclude from Pinecone query
+    visited_ids = list(
+        NodeVisit.objects.filter(session__user=user)
+        .values_list("tweet_id", flat=True)
+        .distinct()
+    )
+    visited_ids = [str(vid) for vid in visited_ids]
+
+    pinecone_filter = {"id": {"$nin": visited_ids}} if visited_ids else None
+
+    # Query larger pool (100) to give re-ranking room to work
+    raw_candidates = query_similar(anchor, top_k=100, filter=pinecone_filter)
+
+    if not raw_candidates:
         return {"nodes": [], "edges": []}
+
+    # Re-rank by recency-boosted score, take top-50
+    candidates = _recency_boost(raw_candidates)
 
     tweet_ids = [c["id"] for c in candidates]
     tweets = TweetNode.objects.filter(id__in=tweet_ids).select_related("user")

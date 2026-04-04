@@ -25,17 +25,22 @@ def upsert_vector(tweet_id: str, vector: list[float], metadata: dict) -> None:
     }])
 
 
-def query_similar(vector: list[float], top_k: int = 50) -> list[dict]:
+def query_similar(vector: list[float], top_k: int = 50, filter: dict = None) -> list[dict]:
     """
     Query Pinecone for the top_k most similar vectors.
-    Returns a list of dicts with keys: id, score, values.
+    Optionally pass a metadata filter dict (Pinecone filter syntax).
+    Returns a list of dicts with keys: id, score, values, metadata.
     """
-    response = _get_index().query(
+    query_kwargs = dict(
         vector=vector,
         top_k=top_k,
         include_values=True,
         include_metadata=True,
     )
+    if filter:
+        query_kwargs["filter"] = filter
+
+    response = _get_index().query(**query_kwargs)
     return [
         {
             "id": match.id,
