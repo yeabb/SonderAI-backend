@@ -81,15 +81,16 @@ def _compute_edges(candidates: list[dict], threshold: float = EDGE_THRESHOLD) ->
     return edges
 
 
-def _compute_anchor_embedding(user) -> list[float]:
+def _full_anchor_recompute(user) -> tuple[list[float], float]:
     """
-    Compute the anchor embedding for a user's feed graph.
+    Full recompute of the anchor embedding from all historical interactions.
+    Returns (anchor_vector, total_weight).
 
-    For new users (no interaction history): embed their interest tags.
-    For returning users: compute a recency-decayed weighted centroid
-    of all content they have meaningfully interacted with.
+    Only called in two situations:
+    1. First time the user opens the feed (no cached anchor yet)
+    2. Daily scheduled job to correct accumulated drift from incremental updates
 
-    Falls back to interest tags if no interaction data produces a valid centroid.
+    For all other cases, use _incremental_anchor_update() instead.
     """
     weighted_vectors = []
     total_weight = 0.0
@@ -98,7 +99,7 @@ def _compute_anchor_embedding(user) -> list[float]:
     pinned_nodes = UserGraphNode.objects.filter(
         graph__user=user,
         source=UserGraphNode.SOURCE_PINNED,
-    ).select_related("tweet__embedding_ref")
+    ).select_related("tweet")
 
     for node in pinned_nodes:
         try:
@@ -110,24 +111,17 @@ def _compute_anchor_embedding(user) -> list[float]:
         except Exception:
             continue
 
-    # --- Saved tweets ---
-    saved_tweets = user.saved_tweets.prefetch_related("embedding_ref").all()
-    # Note: saved_by M2M is on TweetNode — querying from the user's perspective
-    # This will be wired when the save interaction endpoint is built
-    # For now this is a no-op placeholder
-
-    # --- Node visits with dwell time (from graph sessions) ---
+    # --- Node visits with meaningful dwell time ---
     visits = NodeVisit.objects.filter(
         session__user=user,
-        dwell_seconds__gt=5,  # ignore bounces
+        dwell_seconds__gt=5,
     ).select_related("tweet").order_by("-visited_at")[:200]
 
     for visit in visits:
         try:
             vector = _fetch_vector(str(visit.tweet.id))
             if vector:
-                # Scale dwell weight by how long they actually read it
-                dwell_factor = min(visit.dwell_seconds / 60.0, 2.0)  # cap at 2x
+                dwell_factor = min(visit.dwell_seconds / 60.0, 2.0)
                 w = _decay_weight(SIGNAL_WEIGHTS["dwell"] * dwell_factor, visit.visited_at)
                 weighted_vectors.append((w, vector))
                 total_weight += w
@@ -156,15 +150,68 @@ def _compute_anchor_embedding(user) -> list[float]:
         for w, vec in weighted_vectors:
             centroid += w * np.array(vec)
         centroid /= total_weight
-        return centroid.tolist()
+        return centroid.tolist(), total_weight
 
     # --- Fallback: embed interest tags ---
     if user.interest_tags:
         tag_string = " ".join(user.interest_tags)
-        return generate_embedding(tag_string, "")
+        vector = generate_embedding(tag_string, "")
+        return vector, 1.0
 
     # --- Last resort: generic anchor ---
-    return generate_embedding("technology science culture ideas society", "")
+    vector = generate_embedding("technology science culture ideas society", "")
+    return vector, 1.0
+
+
+def _incremental_anchor_update(graph, new_vector: list[float], new_weight: float) -> None:
+    """
+    Fold a single new signal into the cached anchor without recomputing
+    from all historical interactions.
+
+    Formula:
+        new_anchor = (old_anchor * old_total_weight + new_vector * new_weight)
+                     / (old_total_weight + new_weight)
+
+    Also updates cached_total_weight and anchor_updated_at.
+
+    Called after:
+    - A node is pinned (immediate update, strongest signal)
+    - A session ends with significant activity (folds in session signals)
+    """
+    old_anchor = np.array(graph.cached_anchor)
+    old_weight = graph.cached_total_weight
+    new_total_weight = old_weight + new_weight
+
+    updated_anchor = (old_anchor * old_weight + np.array(new_vector) * new_weight) / new_total_weight
+
+    graph.cached_anchor = updated_anchor.tolist()
+    graph.cached_total_weight = new_total_weight
+    graph.anchor_updated_at = django_timezone.now()
+    graph.save(update_fields=["cached_anchor", "cached_total_weight", "anchor_updated_at"])
+
+
+def _get_or_compute_anchor(user) -> list[float]:
+    """
+    Return the cached anchor if it exists, otherwise run a full recompute
+    and cache the result.
+
+    This is the only function build_feed_graph should call to get the anchor.
+    """
+    try:
+        graph = UserGraph.objects.get(user=user)
+    except UserGraph.DoesNotExist:
+        graph = UserGraph.objects.create(user=user)
+
+    if graph.cached_anchor:
+        return graph.cached_anchor
+
+    # No cached anchor — full recompute (first session or cache was cleared)
+    anchor, total_weight = _full_anchor_recompute(user)
+    graph.cached_anchor = anchor
+    graph.cached_total_weight = total_weight
+    graph.anchor_updated_at = django_timezone.now()
+    graph.save(update_fields=["cached_anchor", "cached_total_weight", "anchor_updated_at"])
+    return anchor
 
 
 def _fetch_vector(tweet_id: str) -> list[float] | None:
@@ -251,7 +298,7 @@ def build_feed_graph(user) -> dict:
 
     Called on session start — not on every page load.
     """
-    anchor = _compute_anchor_embedding(user)
+    anchor = _get_or_compute_anchor(user)
 
     # Collect visited tweet IDs to exclude from Pinecone query
     visited_ids = list(

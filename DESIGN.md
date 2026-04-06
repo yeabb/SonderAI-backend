@@ -301,7 +301,29 @@ Weighted centroid of signals, in order of weight:
 
 Each signal is weighted by **recency decay** (λ=0.01) — older interactions contribute less to the anchor. This keeps the anchor aligned with current interests rather than a stale historical average.
 
-The anchor is computed as a recency-decayed weighted centroid of all content the user has meaningfully interacted with. It is **not recomputed on every session** — it is recomputed when meaningful interaction events occur (session end with significant activity), with a scheduled fallback job as a safety net.
+The anchor is a recency-decayed weighted centroid of all content the user has meaningfully interacted with. It is **cached on `UserGraph`** and updated incrementally — not recomputed from scratch on every session.
+
+### Anchor caching and incremental updates
+
+The anchor and its total weight are stored on `UserGraph`:
+- `cached_anchor` — the 1536d vector
+- `cached_total_weight` — the sum of all signal weights used to compute it
+- `anchor_updated_at` — when it was last computed
+
+**Incremental update formula** — when a new signal arrives, the anchor is nudged toward the new content without touching historical data:
+```
+new_anchor = (old_anchor * old_total_weight + new_vector * new_weight)
+             / (old_total_weight + new_weight)
+```
+This requires only one Pinecone fetch (for the new signal's vector) and one vector math operation. No iteration over historical interactions.
+
+**When incremental updates are triggered:**
+- **Pin action** — immediately, synchronously. Strongest signal, should reflect right away.
+- **Session end with significant activity** — asynchronously after the session closes. "Significant" means at least one pin, or 3+ node visits with dwell > 10s, or 2+ edge traversals.
+
+**When full recomputes happen:**
+- First session ever (no cached anchor exists yet)
+- Daily scheduled background job — corrects accumulated floating point drift from many incremental updates and re-applies recency decay to all historical signals
 
 ### Anchor drift
 As the user navigates the graph and follows edges into new semantic territory, their interaction history naturally shifts. The anchor drifts over time to reflect where the user has been exploring — meaning the feed graph self-refreshes through use without any explicit tuning. This is a first-class mechanism, not a side effect.
