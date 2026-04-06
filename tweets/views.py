@@ -1,3 +1,4 @@
+import threading
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -6,6 +7,7 @@ from django.db import transaction
 from .models import TweetNode, EmbeddingReference
 from .services.embedding import generate_embedding
 from .services.pinecone import upsert_vector
+from graphs.services.graph import build_profile_graph
 
 
 class TweetListCreateView(APIView):
@@ -45,6 +47,11 @@ class TweetListCreateView(APIView):
                 tweet=tweet,
                 pinecone_vector_id=str(tweet.id),
             )
+
+        # Rebuild the profile graph in the background — don't block the API response
+        user = request.user
+        thread = threading.Thread(target=build_profile_graph, args=(user,), daemon=True)
+        thread.start()
 
         return Response(
             {
