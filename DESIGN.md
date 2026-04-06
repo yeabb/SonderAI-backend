@@ -1,6 +1,8 @@
 # SonderAI — Design Document
 > Version 2.0 | April 2026
 
+> Architecture diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
 ---
 
 ## 1. Problem & Vision
