@@ -9,6 +9,19 @@ class UserGraph(models.Model):
         on_delete=models.CASCADE,
         related_name="graph",
     )
+    # Cached anchor embedding — 1536d vector stored as a JSON array.
+    # Used as the starting point for Pinecone queries without recomputing
+    # from scratch on every session start.
+    cached_anchor = models.JSONField(null=True, blank=True)
+
+    # Sum of all signal weights used to compute cached_anchor.
+    # Required for incremental updates — without this we'd have to
+    # recompute the full centroid from all historical interactions.
+    cached_total_weight = models.FloatField(default=0.0)
+
+    # When the anchor was last computed — used to detect staleness.
+    anchor_updated_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
