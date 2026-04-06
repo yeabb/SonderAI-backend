@@ -52,6 +52,9 @@ htmlcov/
 # Docker
 .docker/
 
+# Internal design docs — keep off public repo
+DESIGN.md
+
 # Migrations (keep the files but ignore local state)
 # Uncomment below if you want to ignore migrations
 # */migrations/*.py
