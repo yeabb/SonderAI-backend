@@ -14,44 +14,44 @@ graph TB
     end
 
     %% ── CDN / Edge ───────────────────────────────────────────
-    subgraph CDN["☁️ CDN & Edge  (Vercel)"]
-        NextJS["Next.js App\nreact-force-graph-2d/3d"]
-        VercelCDN["Vercel Edge Network\n(static assets, SSR)"]
+    subgraph CDN["☁️ CDN & Edge (Vercel)"]
+        NextJS["Next.js App<br/>react-force-graph-2d/3d"]
+        VercelCDN["Vercel Edge Network<br/>static assets / SSR"]
     end
 
     %% ── AWS Public Subnet ────────────────────────────────────
     subgraph AWS_PUBLIC["🔶 AWS — Public Subnet"]
-        Route53["Route 53\n(DNS)"]
-        ALB["Application Load Balancer\n(HTTPS termination)"]
+        Route53["Route 53<br/>DNS"]
+        ALB["Application Load Balancer<br/>HTTPS termination"]
     end
 
     %% ── AWS Private Subnet — Compute ─────────────────────────
-    subgraph AWS_COMPUTE["🔒 AWS — Private Subnet  (Compute)"]
-        Django["Django REST API\nECS Fargate"]
-        ECR["ECR\n(Docker registry)"]
+    subgraph AWS_COMPUTE["🔒 AWS — Private Subnet (Compute)"]
+        Django["Django REST API<br/>ECS Fargate"]
+        ECR["ECR<br/>Docker registry"]
     end
 
     %% ── AWS Private Subnet — Data ────────────────────────────
-    subgraph AWS_DATA["🔒 AWS — Private Subnet  (Data)"]
-        RDS["RDS PostgreSQL\n(source of truth)"]
+    subgraph AWS_DATA["🔒 AWS — Private Subnet (Data)"]
+        RDS["RDS PostgreSQL<br/>source of truth"]
     end
 
     %% ── AWS Managed Services ─────────────────────────────────
     subgraph AWS_MANAGED["🛠️ AWS Managed Services"]
-        Cognito["Cognito\n(Identity & Auth)"]
-        Secrets["Secrets Manager\n(API keys, credentials)"]
-        CloudWatch["CloudWatch\n(Logs & Metrics)"]
+        Cognito["Cognito<br/>Identity & Auth"]
+        Secrets["Secrets Manager<br/>API keys & credentials"]
+        CloudWatch["CloudWatch<br/>Logs & Metrics"]
     end
 
     %% ── External SaaS ────────────────────────────────────────
     subgraph SAAS["🔌 External SaaS"]
-        Pinecone["Pinecone\n(Vector DB)"]
-        OpenAI["OpenAI\n(Embeddings API)"]
+        Pinecone["Pinecone<br/>Vector DB"]
+        OpenAI["OpenAI<br/>Embeddings API"]
     end
 
     %% ── Connections ──────────────────────────────────────────
     Browser -->|"HTTPS"| NextJS
-    Browser -->|"Auth (HTTPS)"| Cognito
+    Browser -->|"Auth"| Cognito
     NextJS --> VercelCDN
     NextJS -->|"REST API (HTTPS)"| ALB
 
@@ -64,14 +64,14 @@ graph TB
     Django -->|"HTTPS"| OpenAI
     Django -->|"HTTPS"| Cognito
     Django -->|"HTTPS"| Secrets
-    Django -->|"logs/metrics"| CloudWatch
+    Django -->|"logs / metrics"| CloudWatch
 ```
 
 ---
 
 ## 2. System Workflow
 
-End-to-end behavior across all major user journeys. Shows how every layer participates in each flow.
+End-to-end behavior across all major user journeys.
 
 ```mermaid
 sequenceDiagram
@@ -84,128 +84,117 @@ sequenceDiagram
     participant OAI as OpenAI
     participant BG as Background Thread
 
-    %% ─────────────────────────────────
-    %% AUTHENTICATION
-    %% ─────────────────────────────────
+    %% ── AUTHENTICATION ───────────────────────────────────────
     rect rgb(230, 245, 255)
         note over User,OAI: Authentication
         User->>FE: Sign up / Sign in
         FE->>Cognito: Authenticate credentials
         Cognito-->>FE: JWT token
-        FE->>API: POST /api/v1/users/onboarding/ (JWT + interest tags)
+        FE->>API: POST /api/v1/users/onboarding/
         API->>Cognito: Validate JWT
         Cognito-->>API: Claims (cognito_id)
-        API->>PG: INSERT UserProfile (cognito_id, interest_tags)
+        API->>PG: INSERT UserProfile
         API-->>FE: 200 OK
     end
 
-    %% ─────────────────────────────────
-    %% TWEET CREATION
-    %% ─────────────────────────────────
+    %% ── TWEET CREATION ───────────────────────────────────────
     rect rgb(230, 255, 235)
         note over User,OAI: Tweet Creation
         User->>FE: Write and submit tweet
-        FE->>API: POST /api/v1/tweets/ (JWT + title + content)
+        FE->>API: POST /api/v1/tweets/
         API->>Cognito: Validate JWT
-        API->>PG: INSERT TweetNode (uuid, title, content)
-        API->>OAI: embed(title + content) → 1536d vector
-        OAI-->>API: vector
+        API->>PG: INSERT TweetNode
+        API->>OAI: embed(title + content)
+        OAI-->>API: 1536d vector
         API->>PC: upsert(tweet_id, vector, metadata)
         API->>PG: INSERT EmbeddingReference
-        API->>BG: spawn → build_profile_graph(user)
-        API-->>FE: 201 Created { id, title, content }
+        API->>BG: spawn build_profile_graph(user)
+        API-->>FE: 201 Created
 
-        BG->>PC: fetch(all user tweet vectors)
+        BG->>PC: fetch all user tweet vectors
         BG->>BG: pairwise cosine similarity
         BG->>PG: upsert UserGraph / UserGraphNode / UserGraphEdge
     end
 
-    %% ─────────────────────────────────
-    %% FEED GRAPH LOAD
-    %% ─────────────────────────────────
+    %% ── FEED GRAPH LOAD ──────────────────────────────────────
     rect rgb(255, 245, 220)
         note over User,OAI: Feed Graph Load (session start)
-        User->>FE: Open app / home page
-        FE->>API: GET /api/v1/graph/feed/ (JWT)
+        User->>FE: Open app
+        FE->>API: GET /api/v1/graph/feed/
         API->>Cognito: Validate JWT
         API->>PG: Read UserGraph.cached_anchor
 
         alt No cached anchor (first session)
-            API->>PC: fetch vectors for all pinned nodes + visits + traversals
-            API->>API: _full_anchor_recompute\n(recency-decayed weighted centroid)
-            API->>PG: Save cached_anchor + cached_total_weight
+            API->>PC: fetch vectors for all historical signals
+            API->>API: full anchor recompute (weighted centroid)
+            API->>PG: save cached_anchor + cached_total_weight
         else Cached anchor exists
-            API->>API: Use cached_anchor directly
+            API->>API: use cached_anchor directly
         end
 
-        API->>PG: Get visited tweet IDs (NodeVisit)
-        API->>PC: query top-100\n(anchor vector, exclude visited IDs)
+        API->>PG: get visited tweet IDs from NodeVisit
+        API->>PC: query top-100 (anchor, exclude visited IDs)
         PC-->>API: 100 candidates with vectors + metadata
-        API->>API: _recency_boost\n(re-rank by similarity × e^-λt, take top-50)
-        API->>PG: Bulk fetch TweetNode objects
-        API->>API: _compute_edges\n(pairwise cosine similarity, threshold=0.7)
-        API-->>FE: { nodes: [...], edges: [...] }
-        FE->>FE: Render graph (react-force-graph-2d/3d)
-        FE->>API: POST /api/v1/interactions/session/ → start GraphSession
+        API->>API: recency boost re-rank, take top-50
+        API->>PG: bulk fetch TweetNode objects
+        API->>API: pairwise cosine similarity, threshold 0.7
+        API-->>FE: nodes + edges JSON
+        FE->>FE: render graph
+        FE->>API: POST /api/v1/interactions/session/
+        API->>PG: INSERT GraphSession
     end
 
-    %% ─────────────────────────────────
-    %% GRAPH NAVIGATION
-    %% ─────────────────────────────────
+    %% ── GRAPH NAVIGATION ─────────────────────────────────────
     rect rgb(255, 230, 245)
         note over User,OAI: Graph Navigation (within session)
         User->>FE: Click a node
-        FE->>API: POST /api/v1/interactions/visit/\n(tweet_id, position_in_path)
-        API->>PG: INSERT NodeVisit (start dwell timer)
+        FE->>API: POST /api/v1/interactions/visit/
+        API->>PG: INSERT NodeVisit
 
         User->>FE: Read tweet, follow an edge
-        FE->>API: POST /api/v1/interactions/visit/ (dwell_seconds)
+        FE->>API: POST /api/v1/interactions/visit/ (with dwell_seconds)
         API->>PG: UPDATE NodeVisit.dwell_seconds
-        FE->>API: POST /api/v1/interactions/traverse/\n(from_tweet_id, to_tweet_id)
+        FE->>API: POST /api/v1/interactions/traverse/
         API->>PG: INSERT EdgeTraversal
 
-        User->>FE: Close app / end session
+        User->>FE: Close app
         FE->>API: POST /api/v1/interactions/session/end/
         API->>PG: UPDATE GraphSession.ended_at
 
-        alt Significant activity this session\n(pin OR 3+ visits >10s OR 2+ traversals)
-            API->>BG: spawn → incremental anchor update
+        alt Significant activity (pin OR 3+ visits over 10s OR 2+ traversals)
+            API->>BG: spawn incremental anchor update
             BG->>PC: fetch vectors for new signals only
-            BG->>BG: new_anchor = (old × old_w + new_vec × new_w) / (old_w + new_w)
-            BG->>PG: UPDATE cached_anchor, cached_total_weight
+            BG->>BG: new_anchor = (old x old_w + new_vec x new_w) / (old_w + new_w)
+            BG->>PG: UPDATE cached_anchor + cached_total_weight
         end
     end
 
-    %% ─────────────────────────────────
-    %% NODE PIN
-    %% ─────────────────────────────────
+    %% ── NODE PIN ─────────────────────────────────────────────
     rect rgb(240, 230, 255)
-        note over User,OAI: Pin a Node ("Add to my graph")
+        note over User,OAI: Pin a Node
         User->>FE: Pin a tweet
-        FE->>API: POST /api/v1/graph/pin/ (tweet_id)
+        FE->>API: POST /api/v1/graph/pin/
         API->>PG: INSERT UserGraphNode (source=pinned)
-        API->>PC: fetch(tweet vector)
-        API->>PG: fetch vectors for existing UserGraph nodes
+        API->>PC: fetch pinned tweet vector
+        API->>PG: fetch existing UserGraph node vectors
         API->>API: compute similarity vs all existing nodes
-        API->>PG: INSERT UserGraphEdge records (weight ≥ 0.7)
-        API->>BG: spawn → _incremental_anchor_update (pin signal, immediate)
-        BG->>PC: fetch(pinned tweet vector)
+        API->>PG: INSERT UserGraphEdge records
+        API->>BG: spawn incremental anchor update (immediate)
+        BG->>PC: fetch pinned tweet vector
         BG->>BG: weighted average update
-        BG->>PG: UPDATE cached_anchor, cached_total_weight
+        BG->>PG: UPDATE cached_anchor + cached_total_weight
         API-->>FE: 200 OK
     end
 
-    %% ─────────────────────────────────
-    %% PROFILE GRAPH LOAD
-    %% ─────────────────────────────────
+    %% ── PROFILE GRAPH LOAD ───────────────────────────────────
     rect rgb(235, 255, 245)
         note over User,OAI: Profile Graph Load
-        User->>FE: Visit a user's profile
-        FE->>API: GET /api/v1/graph/profile/{user_id}/
-        API->>PG: SELECT UserGraphNode + UserGraphEdge\n(pure DB read, no computation)
+        User->>FE: Visit a user profile
+        FE->>API: GET /api/v1/graph/profile/user_id/
+        API->>PG: SELECT UserGraphNode + UserGraphEdge
         PG-->>API: nodes + edges
-        API-->>FE: { nodes: [...], edges: [...] }
-        FE->>FE: Render profile graph
+        API-->>FE: nodes + edges JSON
+        FE->>FE: render profile graph
     end
 ```
 
@@ -217,20 +206,20 @@ Detailed flowchart of the feed graph algorithm.
 
 ```mermaid
 flowchart TD
-    A([Session Start\nGET /api/v1/graph/feed/]) --> B{UserGraph.cached_anchor\nexists?}
+    A(["Session Start — GET /api/v1/graph/feed/"]) --> B{"UserGraph.cached_anchor exists?"}
 
-    B -->|Yes| D[Use cached anchor]
-    B -->|No| C[_full_anchor_recompute\nfetch all historical signals\nfrom Pinecone + DB]
-    C --> C2[Save anchor + total_weight\nto UserGraph]
+    B -->|Yes| D["Use cached anchor"]
+    B -->|No| C["_full_anchor_recompute<br/>fetch all historical signals<br/>from Pinecone + DB"]
+    C --> C2["Save anchor + total_weight to UserGraph"]
     C2 --> D
 
-    D --> E[Get all visited tweet IDs\nfrom NodeVisit table]
-    E --> F[Query Pinecone top-100\nwith visited IDs excluded\ninside the query]
-    F --> G[_recency_boost\nre-rank by similarity × e^\(-λ × days\)\ntake top-50]
-    G --> H[Bulk fetch TweetNode\nobjects from Postgres]
-    H --> I[_compute_edges\npairwise cosine similarity\nO n² — at n=50, 1225 comparisons\nthreshold = 0.7]
-    I --> J[Return graph JSON\n{ nodes, edges }]
-    J --> K([Frontend renders graph\nreact-force-graph-2d/3d])
+    D --> E["Get all visited tweet IDs from NodeVisit"]
+    E --> F["Query Pinecone top-100<br/>exclude visited IDs inside the query"]
+    F --> G["_recency_boost<br/>re-rank by similarity x e^(-λ x days)<br/>take top-50"]
+    G --> H["Bulk fetch TweetNode objects from Postgres"]
+    H --> I["_compute_edges<br/>pairwise cosine similarity<br/>n=50 → 1,225 comparisons — threshold 0.7"]
+    I --> J["Return graph JSON — nodes + edges"]
+    J --> K(["Frontend renders graph"])
 ```
 
 ---
@@ -244,18 +233,18 @@ stateDiagram-v2
     [*] --> NoAnchor: New user
 
     NoAnchor --> FullRecompute: First feed graph request
-    FullRecompute --> Cached: Save anchor + total_weight\nto UserGraph
+    FullRecompute --> Cached: Save anchor + total_weight to UserGraph
 
-    Cached --> IncrementalUpdate: User pins a node\n(immediate, sync)
-    Cached --> IncrementalUpdate: Session ends with\nsignificant activity\n(async background)
-    IncrementalUpdate --> Cached: new_anchor =\n(old × old_w + new_vec × new_w)\n÷ (old_w + new_w)
+    Cached --> IncrementalUpdate: User pins a node (immediate)
+    Cached --> IncrementalUpdate: Session ends with significant activity (async)
+    IncrementalUpdate --> Cached: Weighted average update
 
-    Cached --> FullRecompute: Daily scheduled job\n(correct drift, re-apply decay)
+    Cached --> FullRecompute: Daily scheduled job (correct drift)
 
     state IncrementalUpdate {
-        [*] --> FetchNewVector: Pinecone fetch\n(1 vector only)
-        FetchNewVector --> UpdateMath: Weighted average\n(1 operation)
-        UpdateMath --> SaveToDB: Update cached_anchor\ncached_total_weight\nanchor_updated_at
+        [*] --> FetchNewVector: Fetch 1 vector from Pinecone
+        FetchNewVector --> UpdateMath: new_anchor = (old x old_w + new x new_w) / total_w
+        UpdateMath --> SaveToDB: UPDATE cached_anchor + cached_total_weight
     }
 ```
 
@@ -269,23 +258,23 @@ How the two graph types differ in construction, storage, and serving.
 flowchart LR
     subgraph Profile["Profile Graph"]
         direction TB
-        PT["Trigger:\nTweet created or deleted"]
-        PB["build_profile_graph\nfetch all user tweet vectors\nfrom Pinecone in one batch"]
-        PE["Pairwise cosine similarity\nacross all user's tweets"]
-        PS["Persist to Postgres\nUserGraph / UserGraphNode\nUserGraphEdge"]
-        PR["Profile page load:\npure DB read\nno computation"]
+        PT["Trigger: tweet created or deleted"]
+        PB["fetch all user tweet vectors from Pinecone"]
+        PE["pairwise cosine similarity across all tweets"]
+        PS["persist to Postgres<br/>UserGraph / UserGraphNode / UserGraphEdge"]
+        PR["Profile page load: pure DB read — no computation"]
         PT --> PB --> PE --> PS
         PS -->|"precomputed"| PR
     end
 
     subgraph Feed["Feed Graph"]
         direction TB
-        FT["Trigger:\nSession start"]
-        FA["_get_or_compute_anchor\nread cache or full recompute"]
-        FQ["Pinecone query top-100\nexclude visited nodes\ninside the query"]
-        FR["Recency boost re-rank\ntake top-50"]
-        FE["Pairwise cosine similarity\non top-50 candidates"]
-        FJ["Return graph JSON\nnot persisted"]
+        FT["Trigger: session start"]
+        FA["read cached anchor or full recompute"]
+        FQ["Pinecone query top-100<br/>exclude visited nodes inside query"]
+        FR["recency boost re-rank — take top-50"]
+        FE["pairwise cosine similarity on top-50"]
+        FJ["return graph JSON — not persisted"]
         FT --> FA --> FQ --> FR --> FE --> FJ
     end
 ```
