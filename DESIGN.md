@@ -299,7 +299,34 @@ Weighted centroid of signals, in order of weight:
 | Private like | Lower | Useful signal but performative risk |
 | Interest tags | Baseline | Always included, gradually down-weighted as behavioral data grows |
 
-The anchor is computed as a weighted average of the embedding vectors of all content the user has meaningfully interacted with. This means the feed graph improves automatically the more the product is used — no explicit preference tuning required.
+Each signal is weighted by **recency decay** (λ=0.01) — older interactions contribute less to the anchor. This keeps the anchor aligned with current interests rather than a stale historical average.
+
+The anchor is a recency-decayed weighted centroid of all content the user has meaningfully interacted with. It is **cached on `UserGraph`** and updated incrementally — not recomputed from scratch on every session.
+
+### Anchor caching and incremental updates
+
+The anchor and its total weight are stored on `UserGraph`:
+- `cached_anchor` — the 1536d vector
+- `cached_total_weight` — the sum of all signal weights used to compute it
+- `anchor_updated_at` — when it was last computed
+
+**Incremental update formula** — when a new signal arrives, the anchor is nudged toward the new content without touching historical data:
+```
+new_anchor = (old_anchor * old_total_weight + new_vector * new_weight)
+             / (old_total_weight + new_weight)
+```
+This requires only one Pinecone fetch (for the new signal's vector) and one vector math operation. No iteration over historical interactions.
+
+**When incremental updates are triggered:**
+- **Pin action** — immediately, synchronously. Strongest signal, should reflect right away.
+- **Session end with significant activity** — asynchronously after the session closes. "Significant" means at least one pin, or 3+ node visits with dwell > 10s, or 2+ edge traversals.
+
+**When full recomputes happen:**
+- First session ever (no cached anchor exists yet)
+- Daily scheduled background job — corrects accumulated floating point drift from many incremental updates and re-applies recency decay to all historical signals
+
+### Anchor drift
+As the user navigates the graph and follows edges into new semantic territory, their interaction history naturally shifts. The anchor drifts over time to reflect where the user has been exploring — meaning the feed graph self-refreshes through use without any explicit tuning. This is a first-class mechanism, not a side effect.
 
 ### Global / trending graph
 For users with no content or signals: embed a representative string of broad topics as a fallback anchor. Replaced by real signals as soon as interaction data exists.
@@ -314,19 +341,33 @@ For users with no content or signals: embed a representative string of broad top
 Derive the anchor vector from the user's interaction history (Section 7).
 
 **Step 2 — Candidate retrieval**
-Query Pinecone for top-K most semantically similar tweets:
+Query Pinecone for top-100 candidates (larger pool to give re-ranking room to work), excluding tweets the user has already visited:
 ```python
-top_k = 50  # tunable
-results = pinecone.query(vector=anchor_embedding, top_k=50, include_values=True)
-```
+visited_ids = NodeVisit.objects.filter(session__user=user).values_list("tweet_id", flat=True)
 
-**Step 3 — Fetch tweet objects**
+results = pinecone.query(
+    vector=anchor_embedding,
+    top_k=100,
+    include_values=True,
+    filter={"tweet_id": {"$nin": list(visited_ids)}}
+)
+```
+Excluding seen content **inside the Pinecone query** (not post-filter) ensures the result set is always full-sized regardless of how much content the user has already seen. Post-filter would shrink the graph over time.
+
+**Step 3 — Recency-boosted re-ranking**
+Re-rank the 100 candidates by combining semantic similarity with a recency decay factor. Recent content gets a boost without completely burying highly relevant older content:
+```python
+final_score = similarity_score * e^(-λ * days_since_created)  # λ=0.01
+```
+Take the top-50 by final score. These are the nodes that enter the graph.
+
+**Step 4 — Fetch tweet objects**
 Bulk fetch from Postgres:
 ```python
-tweet_nodes = TweetNode.objects.filter(id__in=list_of_ids)
+tweet_nodes = TweetNode.objects.filter(id__in=top_50_ids)
 ```
 
-**Step 4 — Edge construction (pairwise, in-memory)**
+**Step 5 — Edge construction (pairwise, in-memory)**
 Do NOT re-query Pinecone per node. All vectors are already in memory from Step 2.
 ```python
 for each pair (i, j) in candidates:
@@ -338,7 +379,7 @@ for each pair (i, j) in candidates:
 **Edge threshold:** Static `0.7` for MVP. Tunable.
 **Complexity:** O(n²). At n=50 → 1,225 comparisons. Trivially fast.
 
-**Step 5 — Return graph JSON**
+**Step 6 — Return graph JSON**
 ```json
 {
   "nodes": [
@@ -387,7 +428,27 @@ Group nodes into topic clusters using HDBSCAN on embedding vectors. Used for vis
 
 ---
 
-## 9. Graph UI — Lenses and Views
+## 9. Content Freshness Strategy
+
+Content freshness is solved at multiple layers, each operating at a different timescale:
+
+| Layer | Mechanism | Timescale |
+|---|---|---|
+| Seen-content exclusion | Visited tweet IDs excluded inside Pinecone query | Per session |
+| Recency-boosted ranking | `similarity * e^(-λ * days_since_created)` re-ranks candidates | Per session |
+| Anchor drift | Navigation shifts interaction history → anchor evolves naturally | Across sessions |
+| Anchor recomputation | Triggered by significant interaction events + scheduled fallback | Across sessions |
+| Content volume | New tweets upserted to Pinecone immediately, available in next query | Real-time |
+
+### Content staleness — the honest picture
+If no new relevant content has been created since the last session, the candidate pool from Pinecone is identical regardless of re-ranking. This is a **content supply problem**, not an algorithm problem. It is ultimately solved by platform growth and content volume. At MVP scale this is acceptable and expected.
+
+### Serendipity injection (v2)
+Reserve a portion of the graph for content slightly outside the user's current anchor — queried from a semantically adjacent vector. Accelerates discovery into new topic territory and naturally expands the anchor over time. Deferred until content volume makes it meaningful.
+
+---
+
+## 10. Graph UI — Lenses and Views
 
 The underlying graph data is always complete. What the user sees at any moment is a **lens** over it.
 
@@ -409,7 +470,7 @@ Nodes the user **created** vs. nodes they **pinned** render with different visua
 
 ---
 
-## 10. API Design
+## 11. API Design
 
 All endpoints are prefixed with `/api/v1/`.
 
@@ -455,7 +516,7 @@ GET    /api/v1/users/me/            — get current user profile
 
 ---
 
-## 11. Frontend Architecture
+## 12. Frontend Architecture
 
 ### Pages (Next.js routes)
 ```
@@ -494,7 +555,7 @@ React state + fetch for MVP. No Redux needed at this scale.
 
 ---
 
-## 12. Infrastructure
+## 13. Infrastructure
 
 ### AWS Setup
 
@@ -532,7 +593,7 @@ GitHub Actions:
 
 ---
 
-## 13. Open Decisions
+## 14. Open Decisions
 
 | Decision | Options | Notes |
 |---|---|---|
@@ -545,7 +606,7 @@ GitHub Actions:
 
 ---
 
-## 14. What We Are Not Building (Explicit Anti-Patterns)
+## 15. What We Are Not Building (Explicit Anti-Patterns)
 
 - **No infinite scroll** — intentional navigation only
 - **No algorithmic feed** — the graph IS the discovery mechanism
@@ -558,7 +619,7 @@ GitHub Actions:
 
 ---
 
-## 15. Future Roadmap
+## 16. Future Roadmap
 
 **v2 — Social Layer**
 - Comment system (reimagined for graph-native context, not threaded replies)
