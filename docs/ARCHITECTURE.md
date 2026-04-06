@@ -206,20 +206,41 @@ Detailed flowchart of the feed graph algorithm.
 
 ```mermaid
 flowchart TD
-    A(["Session Start — GET /api/v1/graph/feed/"]) --> B{"UserGraph.cached_anchor exists?"}
+    START(["Session Start — GET /api/v1/graph/feed/"])
 
-    B -->|Yes| D["Use cached anchor"]
-    B -->|No| C["_full_anchor_recompute<br/>fetch all historical signals<br/>from Pinecone + DB"]
-    C --> C2["Save anchor + total_weight to UserGraph"]
-    C2 --> D
+    START --> ANCHOR_CHECK{"cached_anchor\nexists on UserGraph?"}
 
-    D --> E["Get all visited tweet IDs from NodeVisit"]
-    E --> F["Query Pinecone top-100<br/>exclude visited IDs inside the query"]
-    F --> G["_recency_boost<br/>re-rank by similarity x e^(-λ x days)<br/>take top-50"]
-    G --> H["Bulk fetch TweetNode objects from Postgres"]
-    H --> I["_compute_edges<br/>pairwise cosine similarity<br/>n=50 → 1,225 comparisons — threshold 0.7"]
-    I --> J["Return graph JSON — nodes + edges"]
-    J --> K(["Frontend renders graph"])
+    subgraph ANCHOR_RESOLUTION["🧠 Anchor Resolution"]
+        direction TB
+        RECOMPUTE["Full recompute<br/>Fetch all historical signals from Pinecone + DB<br/>Apply recency decay weights across all signals"]
+        SAVE_ANCHOR["Save cached_anchor + cached_total_weight<br/>to UserGraph"]
+        USE_CACHE["Use cached anchor<br/>Single DB field read — no computation"]
+        RECOMPUTE --> SAVE_ANCHOR --> USE_CACHE
+    end
+
+    ANCHOR_CHECK -->|"No — first session"| RECOMPUTE
+    ANCHOR_CHECK -->|"Yes"| USE_CACHE
+
+    subgraph CANDIDATE_RETRIEVAL["🔍 Candidate Retrieval"]
+        direction TB
+        VISITED["Load all visited tweet IDs<br/>from NodeVisit table"]
+        PINECONE_QUERY["Query Pinecone top-100<br/>Anchor vector — exclude visited IDs inside query<br/>Result set always full-sized regardless of history"]
+        RERANK["Recency boost re-rank<br/>score = similarity x e^(-λ x days_since_created)<br/>Take top-50"]
+        VISITED --> PINECONE_QUERY --> RERANK
+    end
+
+    USE_CACHE --> VISITED
+
+    subgraph GRAPH_CONSTRUCTION["🕸️ Graph Construction"]
+        direction TB
+        PG_FETCH["Bulk fetch TweetNode objects<br/>from Postgres"]
+        EDGES["Pairwise cosine similarity<br/>50 nodes — 1,225 comparisons<br/>Create edge where similarity is above 0.7"]
+        PG_FETCH --> EDGES
+    end
+
+    RERANK --> PG_FETCH
+
+    EDGES --> RESPONSE(["Return nodes + edges JSON<br/>Frontend renders graph"])
 ```
 
 ---
@@ -232,20 +253,27 @@ How the anchor embedding is created, cached, and kept fresh.
 stateDiagram-v2
     [*] --> NoAnchor: New user
 
-    NoAnchor --> FullRecompute: First feed graph request
-    FullRecompute --> Cached: Save anchor + total_weight to UserGraph
-
-    Cached --> IncrementalUpdate: User pins a node (immediate)
-    Cached --> IncrementalUpdate: Session ends with significant activity (async)
-    IncrementalUpdate --> Cached: Weighted average update
-
-    Cached --> FullRecompute: Daily scheduled job (correct drift)
-
-    state IncrementalUpdate {
-        [*] --> FetchNewVector: Fetch 1 vector from Pinecone
-        FetchNewVector --> UpdateMath: new_anchor = (old x old_w + new x new_w) / total_w
-        UpdateMath --> SaveToDB: UPDATE cached_anchor + cached_total_weight
+    state FullRecomputePath {
+        [*] --> FetchAllSignals: Fetch all historical signals from Pinecone + DB
+        FetchAllSignals --> ApplyDecay: Apply recency decay weights
+        ApplyDecay --> ComputeCentroid: Compute weighted centroid
+        ComputeCentroid --> PersistAnchor: Save cached_anchor + cached_total_weight
     }
+
+    state IncrementalUpdatePath {
+        [*] --> FetchOneVector: Fetch 1 vector from Pinecone
+        FetchOneVector --> WeightedAverage: new = (old x old_w + new_vec x new_w) / total_w
+        WeightedAverage --> UpdateFields: UPDATE cached_anchor + cached_total_weight
+    }
+
+    NoAnchor --> FullRecomputePath: First feed graph request
+    FullRecomputePath --> Cached: Anchor ready
+
+    Cached --> IncrementalUpdatePath: User pins a node (immediate, sync)
+    Cached --> IncrementalUpdatePath: Session ends with significant activity (async)
+    IncrementalUpdatePath --> Cached: Anchor updated
+
+    Cached --> FullRecomputePath: Daily scheduled job — correct accumulated drift
 ```
 
 ---
