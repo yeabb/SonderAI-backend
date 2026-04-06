@@ -4,56 +4,67 @@
 
 ## 1. System Architecture
 
-Components grouped by layer and function.
+Infrastructure grouped by security zone and network boundary.
 
 ```mermaid
 graph TB
-    subgraph CLIENT["🖥️ Client Layer"]
+    %% ── Public Internet ──────────────────────────────────────
+    subgraph INTERNET["🌍 Public Internet"]
         Browser["User's Browser"]
-        NextJS["Next.js App (Vercel)\nreact-force-graph-2d/3d"]
     end
 
-    subgraph EDGE["🌐 Edge & Network Layer"]
-        VercelCDN["Vercel CDN\n(Frontend static assets)"]
-        ALB["AWS ALB\n(Load Balancer)"]
+    %% ── CDN / Edge ───────────────────────────────────────────
+    subgraph CDN["☁️ CDN & Edge  (Vercel)"]
+        NextJS["Next.js App\nreact-force-graph-2d/3d"]
+        VercelCDN["Vercel Edge Network\n(static assets, SSR)"]
     end
 
-    subgraph APP["⚙️ Application Layer"]
-        Django["Django REST API\n(ECS Fargate containers)"]
-        ECR["AWS ECR\n(Docker image registry)"]
+    %% ── AWS Public Subnet ────────────────────────────────────
+    subgraph AWS_PUBLIC["🔶 AWS — Public Subnet"]
+        Route53["Route 53\n(DNS)"]
+        ALB["Application Load Balancer\n(HTTPS termination)"]
     end
 
-    subgraph DATA["🗄️ Data Layer"]
-        RDS["AWS RDS\nPostgreSQL\n(source of truth)"]
-        Pinecone["Pinecone\nVector DB\n(semantic search)"]
+    %% ── AWS Private Subnet — Compute ─────────────────────────
+    subgraph AWS_COMPUTE["🔒 AWS — Private Subnet  (Compute)"]
+        Django["Django REST API\nECS Fargate"]
+        ECR["ECR\n(Docker registry)"]
     end
 
-    subgraph EXTERNAL["🔌 External Services"]
-        Cognito["AWS Cognito\n(Identity & Auth)"]
-        OpenAI["OpenAI API\n(text-embedding-3-small)"]
+    %% ── AWS Private Subnet — Data ────────────────────────────
+    subgraph AWS_DATA["🔒 AWS — Private Subnet  (Data)"]
+        RDS["RDS PostgreSQL\n(source of truth)"]
     end
 
-    subgraph OPS["🔧 Ops & Config"]
-        Secrets["AWS Secrets Manager\n(API keys, DB credentials)"]
-        CloudWatch["AWS CloudWatch\n(Logs & Metrics)"]
-        Route53["AWS Route 53\n(DNS)"]
+    %% ── AWS Managed Services ─────────────────────────────────
+    subgraph AWS_MANAGED["🛠️ AWS Managed Services"]
+        Cognito["Cognito\n(Identity & Auth)"]
+        Secrets["Secrets Manager\n(API keys, credentials)"]
+        CloudWatch["CloudWatch\n(Logs & Metrics)"]
     end
 
-    Browser --> NextJS
+    %% ── External SaaS ────────────────────────────────────────
+    subgraph SAAS["🔌 External SaaS"]
+        Pinecone["Pinecone\n(Vector DB)"]
+        OpenAI["OpenAI\n(Embeddings API)"]
+    end
+
+    %% ── Connections ──────────────────────────────────────────
+    Browser -->|"HTTPS"| NextJS
+    Browser -->|"Auth (HTTPS)"| Cognito
     NextJS --> VercelCDN
-    NextJS -->|"HTTPS REST API calls"| ALB
-    Route53 -->|"DNS routing"| ALB
-    ALB --> Django
-    ECR -->|"pulls image"| Django
+    NextJS -->|"REST API (HTTPS)"| ALB
 
-    Django -->|"read/write"| RDS
-    Django -->|"upsert/query vectors"| Pinecone
-    Django -->|"validate JWT"| Cognito
-    Django -->|"generate embeddings"| OpenAI
-    Django -->|"read secrets"| Secrets
-    Django -->|"emit logs"| CloudWatch
+    Route53 -->|"DNS resolution"| ALB
+    ALB -->|"private network"| Django
+    ECR -->|"image pull"| Django
 
-    Browser -->|"sign in/out, tokens"| Cognito
+    Django -->|"SQL (private subnet)"| RDS
+    Django -->|"HTTPS"| Pinecone
+    Django -->|"HTTPS"| OpenAI
+    Django -->|"HTTPS"| Cognito
+    Django -->|"HTTPS"| Secrets
+    Django -->|"logs/metrics"| CloudWatch
 ```
 
 ---
